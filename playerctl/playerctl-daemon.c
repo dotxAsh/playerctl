@@ -727,27 +727,45 @@ static void proxy_method_call_async_callback(GObject *source_object, GAsyncResul
     GError *error = NULL;
     GDBusMessage *reply = g_dbus_connection_send_message_with_reply_finish(connection, res, &error);
     if (error != NULL) {
+        /* transport-level error finishing the async call */
         g_dbus_method_invocation_return_gerror(invocation, error);
-        g_error_free(error);
+        g_clear_error(&error);
         return;
     }
+    if (reply == NULL) {
+        /* be safe */
+        g_dbus_method_invocation_return_dbus_error(invocation, "org.freedesktop.DBus.Error.Failed",
+                                                   "No reply from player");
+        return;
+    }
+
     GVariant *body = g_dbus_message_get_body(reply);
     GDBusMessageType message_type = g_dbus_message_get_message_type(reply);
     switch (message_type) {
     case G_DBUS_MESSAGE_TYPE_METHOD_RETURN:
-        g_dbus_method_invocation_return_value(invocation, body);
+        if (!body) {
+            g_dbus_method_invocation_return_dbus_error(
+                invocation, "org.freedesktop.DBus.Error.Failed", "Empty reply body");
+        } else {
+            g_dbus_method_invocation_return_value(invocation, body);
+        }
         break;
     case G_DBUS_MESSAGE_TYPE_ERROR: {
-        if (g_variant_n_children(body) > 1) {
+        const char *ename = g_dbus_message_get_error_name(reply);
+        const char *emsg = "Failed to call method";
+        /* some peers attach an error message in the body (tuple); guard it carefully */
+        if (body && g_variant_is_of_type(body, G_VARIANT_TYPE_TUPLE) &&
+            g_variant_n_children(body) > 1) {
             GVariant *error_message_variant = g_variant_get_child_value(body, 1);
-            const char *error_message = g_variant_get_string(error_message_variant, 0);
-            g_dbus_method_invocation_return_dbus_error(
-                invocation, g_dbus_message_get_error_name(reply), error_message);
-            g_variant_unref(error_message_variant);
-        } else {
-            g_dbus_method_invocation_return_dbus_error(
-                invocation, g_dbus_message_get_error_name(reply), "Failed to call method");
+            if (error_message_variant) {
+                const char *maybe = g_variant_get_string(error_message_variant, NULL);
+                if (maybe && *maybe)
+                    emsg = maybe;
+                g_variant_unref(error_message_variant);
+            }
         }
+        g_dbus_method_invocation_return_dbus_error(
+            invocation, ename ? ename : "org.freedesktop.DBus.Error.Failed", emsg);
         break;
     }
     default:
